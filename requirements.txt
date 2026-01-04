@@ -1,0 +1,13 @@
+skyfield
+numpy
+PyQt6
+PyQt6-WebEngine
+pyrtlsdr
+SoapySDR
+sounddevice
+pytest
+pytest-qt
+scipy
+ntplib
+pyserial
+
