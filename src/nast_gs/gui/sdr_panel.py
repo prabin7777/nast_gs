@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from PyQt6 import QtWidgets, QtCore
 from typing import Optional, List
-
 import numpy as np
 
 from nast_gs.sdr import list_soapy_devices, SoapyDevice, RtlSdrDevice, SimulatedSDR
@@ -14,6 +13,13 @@ from nast_gs.demod.fm import fm_demod_to_audio
 from nast_gs.demod.cw import cw_demod
 
 
+# Optional Gqrx backend
+try:
+    from nast_gs.sdr.gqrx import GqrxDevice
+except Exception:
+    GqrxDevice = None
+
+
 class SDRPanel(QtWidgets.QWidget):
     """UI panel to select SDR device, set freq/sample rate, and start/stop device."""
     device_started = QtCore.pyqtSignal(object)
@@ -21,16 +27,22 @@ class SDRPanel(QtWidgets.QWidget):
 
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None):
         super().__init__(parent)
+
+
+        self._en_loc = QtCore.QLocale(QtCore.QLocale.Language.English, QtCore.QLocale.Country.UnitedStates)
+        self.setLocale(self._en_loc)
+
         layout = QtWidgets.QFormLayout()
 
         self.device_combo = QtWidgets.QComboBox()
         self.refresh_btn = QtWidgets.QPushButton("Refresh Devices")
         self.refresh_btn.clicked.connect(self._refresh)
 
+        # IMPORTANT: this is your nominal / tuned center frequency (Hz).
         self.freq_spin = QtWidgets.QDoubleSpinBox()
         self.freq_spin.setRange(100e3, 6e9)
         self.freq_spin.setDecimals(0)
-        self.freq_spin.setValue(435_575_000.0)
+        self.freq_spin.setValue(437_345_000.0) ###
         self.freq_spin.setSuffix(" Hz")
 
         self.samplerate_spin = QtWidgets.QDoubleSpinBox()
@@ -39,29 +51,41 @@ class SDRPanel(QtWidgets.QWidget):
         self.samplerate_spin.setValue(2_400_000.0)
         self.samplerate_spin.setSuffix(" sps")
 
+        # Gqrx remote control fields
+        self.gqrx_host = QtWidgets.QLineEdit("127.0.0.1")
+        self.gqrx_port = QtWidgets.QSpinBox()
+        self.gqrx_port.setRange(1, 65535)
+        self.gqrx_port.setValue(7356)
+
+        self.bandwidth_spin = QtWidgets.QSpinBox()
+        self.bandwidth_spin.setRange(100, 5_000_000)
+        self.bandwidth_spin.setValue(12_000)
+        self.bandwidth_spin.setSuffix(" Hz")
+
         self.start_btn = QtWidgets.QPushButton("Start Device")
         self.start_btn.setCheckable(True)
         self.start_btn.toggled.connect(self._on_toggle)
 
-        # Demod controls
+        # Demod controls (IQ backends only). For Gqrx, we use this dropdown to command Gqrx mode.
         self.play_audio_btn = QtWidgets.QPushButton("Play Demod Audio")
         self.play_audio_btn.setCheckable(True)
         self.play_audio_btn.toggled.connect(self._on_audio_toggle)
 
         self.demod_combo = QtWidgets.QComboBox()
         self.demod_combo.addItems(["FM", "AM", "CW", "RTTY"])
+        self.demod_combo.currentTextChanged.connect(self._on_demod_changed)
 
         self.rtty_out = QtWidgets.QTextEdit()
         self.rtty_out.setReadOnly(True)
         self.rtty_out.setMaximumHeight(80)
 
-        # Save buttons
+        # Save buttons (IQ backends only)
         self.save_iq_btn = QtWidgets.QPushButton("Save IQ")
         self.save_iq_btn.clicked.connect(self._on_save_iq)
         self.save_audio_btn = QtWidgets.QPushButton("Save Audio")
         self.save_audio_btn.clicked.connect(self._on_save_audio)
 
-        # Spectrum
+        # Spectrum (IQ backends only)
         self.spectrum = SpectrumWidget()
         self.open_spec_btn = QtWidgets.QPushButton("Open Spectrum Window")
         self.open_spec_btn.clicked.connect(self._open_spectrum_window)
@@ -69,21 +93,24 @@ class SDRPanel(QtWidgets.QWidget):
         layout.addRow(self.device_combo, self.refresh_btn)
         layout.addRow("Center frequency:", self.freq_spin)
         layout.addRow("Sample rate:", self.samplerate_spin)
-        layout.addRow(self.start_btn)
 
+        layout.addRow("Gqrx host:", self.gqrx_host)
+        layout.addRow("Gqrx port:", self.gqrx_port)
+        layout.addRow("Bandwidth:", self.bandwidth_spin)
+
+        layout.addRow(self.start_btn)
         layout.addRow(self.spectrum)
         layout.addRow(self.open_spec_btn)
-
         layout.addRow(self.save_iq_btn, self.save_audio_btn)
         layout.addRow(self.play_audio_btn)
-        layout.addRow("Demodulation:", self.demod_combo)
+        layout.addRow("Mode/Demod:", self.demod_combo)
         layout.addRow(QtWidgets.QLabel("RTTY/Decoded output:"), self.rtty_out)
 
         self.setLayout(layout)
 
         # runtime
         self.sdr = None
-        self.doppler = None
+        self.doppler: Optional[DopplerController] = None
         self.streamer: Optional[SDRStreamer] = None
         self._spec_timer: Optional[QtCore.QTimer] = None
         self.last_samples: Optional[np.ndarray] = None
@@ -94,7 +121,10 @@ class SDRPanel(QtWidgets.QWidget):
         self._audio_q: List[np.ndarray] = []
         self._audio_fs = 48000
 
+        self.device_combo.currentTextChanged.connect(self._on_backend_changed)
+
         self._refresh()
+        self._on_backend_changed(self.device_combo.currentText())
 
     # ---------------- device list ----------------
 
@@ -108,7 +138,31 @@ class SDRPanel(QtWidgets.QWidget):
         if RtlSdrDevice is not None:
             self.device_combo.addItem("RTL-SDR")
 
+        if GqrxDevice is not None:
+            self.device_combo.addItem("GQRX (external)")
+
         self.device_combo.addItem("Simulated")
+
+    def _on_backend_changed(self, txt: str):
+        is_gqrx = (txt == "GQRX (external)")
+
+        # Gqrx does not support IQ streaming in our app
+        self.samplerate_spin.setEnabled(not is_gqrx)
+        self.spectrum.setEnabled(not is_gqrx)
+        self.open_spec_btn.setEnabled(not is_gqrx)
+        self.save_iq_btn.setEnabled(not is_gqrx)
+        self.save_audio_btn.setEnabled(not is_gqrx)
+        self.play_audio_btn.setEnabled(not is_gqrx)
+
+        # Gqrx remote fields enabled only for Gqrx
+        self.gqrx_host.setEnabled(is_gqrx)
+        self.gqrx_port.setEnabled(is_gqrx)
+        self.bandwidth_spin.setEnabled(is_gqrx)
+
+        # Mode dropdown is used for both:
+        # - IQ backends: demod inside python
+        # - Gqrx backend: command Gqrx mode
+        self.demod_combo.setEnabled(True)
 
     # ---------------- start/stop ----------------
 
@@ -123,60 +177,105 @@ class SDRPanel(QtWidgets.QWidget):
     def _start_device(self):
         sel = self.device_combo.currentText()
         try:
-            if sel.startswith("Soapy"):
-                self.sdr = SoapyDevice()
-            elif sel == "RTL-SDR":
-                self.sdr = RtlSdrDevice(ppm=0)  # ppm disabled due to INVALID_PARAM on some builds
-            else:
-                self.sdr = SimulatedSDR()
-
             cf = float(self.freq_spin.value())
             sr = float(self.samplerate_spin.value())
+            bw = int(self.bandwidth_spin.value())
+            mode = self.demod_combo.currentText()
 
-            self.sdr.set_center_frequency(cf)
-            try:
-                self.sdr.set_sample_rate(sr)
-            except Exception:
-                pass
+            # IMPORTANT: stop any previous state (safety)
+            self._stop_device_internal(emit=False)
 
-            self.sdr.start()
+            if sel.startswith("Soapy"):
+                self.sdr = SoapyDevice()
+                self.sdr.set_center_frequency(cf)
+                try:
+                    self.sdr.set_sample_rate(sr)
+                except Exception:
+                    pass
+                self.sdr.start()
+
+                self.doppler = DopplerController(self.sdr, center_freq_hz=cf)
+
+                self.streamer = SDRStreamer(self.sdr, sample_rate=sr, block_size=8192)
+                self.streamer.start()
+                self._start_spec_timer()
+
+            elif sel == "RTL-SDR":
+                # This will FAIL if Gqrx is already using the dongle (LIBUSB_BUSY).
+                self.sdr = RtlSdrDevice(ppm=0)
+                self.sdr.set_center_frequency(cf)
+                try:
+                    self.sdr.set_sample_rate(sr)
+                except Exception:
+                    pass
+                self.sdr.start()
+
+                self.doppler = DopplerController(self.sdr, center_freq_hz=cf)
+
+                self.streamer = SDRStreamer(self.sdr, sample_rate=sr, block_size=8192)
+                self.streamer.start()
+                self._start_spec_timer()
+
+            elif sel == "GQRX (external)":
+                if GqrxDevice is None:
+                    raise RuntimeError("Gqrx backend not available (import failed).")
+
+                host = self.gqrx_host.text().strip() or "127.0.0.1"
+                port = int(self.gqrx_port.value())
+
+                # Create Gqrx device. Some older versions may not accept mode/bandwidth args.
+                try:
+                    self.sdr = GqrxDevice(host=host, port=port, mode=self._map_mode_for_gqrx(mode), bandwidth_hz=bw)
+                except TypeError:
+                    self.sdr = GqrxDevice(host=host, port=port)
+
+                self.sdr.start()
+
+                # Apply mode/bandwidth if methods exist
+                self._apply_gqrx_mode_bw()
+
+                # Apply initial frequency
+                self.sdr.set_center_frequency(cf)
+
+                # Doppler will retune by calling set_center_frequency()
+                self.doppler = DopplerController(self.sdr, center_freq_hz=cf)
+
+                # CRITICAL: no IQ streamer for Gqrx, otherwise you go back to RTL busy/IQ logic.
+                self.streamer = None
+                self._stop_spec_timer()
+                self.last_samples = None
+
+            else:
+                self.sdr = SimulatedSDR()
+                self.sdr.set_center_frequency(cf)
+                try:
+                    self.sdr.set_sample_rate(sr)
+                except Exception:
+                    pass
+                self.sdr.start()
+
+                self.doppler = DopplerController(self.sdr, center_freq_hz=cf)
+
+                self.streamer = SDRStreamer(self.sdr, sample_rate=sr, block_size=8192)
+                self.streamer.start()
+                self._start_spec_timer()
 
             try:
                 self.device_started.emit(self.sdr)
             except Exception:
                 pass
 
-            self.doppler = DopplerController(self.sdr, center_freq_hz=cf)
-
-            # streamer pulls IQ continuously
-            self.streamer = SDRStreamer(self.sdr, sample_rate=sr, block_size=8192)
-            self.streamer.start()
-
-            # poll queue for GUI updates
-            self._spec_timer = QtCore.QTimer(self)
-            self._spec_timer.setInterval(10)
-            self._spec_timer.timeout.connect(self._on_spec_poll)
-            self._spec_timer.start()
-
-            self.last_samples = None
-
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "SDR Error", str(e))
             self.start_btn.setChecked(False)
 
     def _stop_device(self):
-        # stop timer first
-        if self._spec_timer is not None:
-            try:
-                self._spec_timer.stop()
-            except Exception:
-                pass
-            self._spec_timer = None
+        self._stop_device_internal(emit=True)
 
-        # stop audio
+    def _stop_device_internal(self, emit: bool):
+        self._stop_spec_timer()
         self._stop_audio_stream()
 
-        # stop streamer
         if self.streamer is not None:
             try:
                 self.streamer.stop()
@@ -184,7 +283,6 @@ class SDRPanel(QtWidgets.QWidget):
                 pass
             self.streamer = None
 
-        # stop SDR
         if self.sdr is not None:
             try:
                 self.sdr.stop()
@@ -193,26 +291,90 @@ class SDRPanel(QtWidgets.QWidget):
             self.sdr = None
 
         self.doppler = None
+        self.last_samples = None
 
-        try:
-            self.device_stopped.emit()
-        except Exception:
-            pass
+        if emit:
+            try:
+                self.device_stopped.emit()
+            except Exception:
+                pass
+
+    def _start_spec_timer(self):
+        self._spec_timer = QtCore.QTimer(self)
+        self._spec_timer.setInterval(10)
+        self._spec_timer.timeout.connect(self._on_spec_poll)
+        self._spec_timer.start()
+
+    def _stop_spec_timer(self):
+        if self._spec_timer is not None:
+            try:
+                self._spec_timer.stop()
+            except Exception:
+                pass
+            self._spec_timer = None
 
     # ---------------- doppler integration ----------------
 
     def apply_doppler(self, new_freq_hz: float):
+        # Called from main_window doppler/tick path.
         if self.sdr:
             try:
-                self.sdr.set_center_frequency(new_freq_hz)
+                self.sdr.set_center_frequency(float(new_freq_hz))
             except Exception:
                 pass
+
+        # Update display
         try:
             self.freq_spin.setValue(float(new_freq_hz))
         except Exception:
             pass
 
-    # ---------------- spectrum + demod ----------------
+        # Keep doppler controller centered around whatever we are using now
+        if self.doppler is not None:
+            try:
+                self.doppler.center = float(new_freq_hz)
+            except Exception:
+                pass
+
+    # ---------------- Gqrx helpers ----------------
+
+    def _map_mode_for_gqrx(self, mode: str) -> str:
+        # Gqrx does not have "RTTY" mode. For RTTY (AFSK), USB is common.
+        m = (mode or "FM").upper().strip()
+        if m == "RTTY":
+            return "USB"
+        if m in ("FM", "AM", "CW", "USB", "LSB"):
+            return m
+        return "FM"
+
+    def _apply_gqrx_mode_bw(self):
+        if self.sdr is None:
+            return
+        if self.device_combo.currentText() != "GQRX (external)":
+            return
+
+        mode = self._map_mode_for_gqrx(self.demod_combo.currentText())
+        bw = int(self.bandwidth_spin.value())
+
+        # call only if supported
+        try:
+            if hasattr(self.sdr, "set_mode"):
+                self.sdr.set_mode(mode)
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self.sdr, "set_bandwidth"):
+                self.sdr.set_bandwidth(bw)
+        except Exception:
+            pass
+
+    def _on_demod_changed(self, _txt: str):
+        # If Gqrx backend is active, switching dropdown should command Gqrx mode immediately.
+        if self.device_combo.currentText() == "GQRX (external)" and self.sdr is not None:
+            self._apply_gqrx_mode_bw()
+
+    # ---------------- spectrum + demod (IQ backends only) ----------------
 
     def _on_spec_poll(self):
         if not self.streamer:
@@ -232,23 +394,19 @@ class SDRPanel(QtWidgets.QWidget):
 
         sr = float(self.samplerate_spin.value())
 
-        # update embedded spectrum
         self.spectrum.update_from_iq(samples, center_hz=center, sample_rate=sr)
 
-        # update external window
         try:
             if self.spec_window is not None:
                 self.spec_window.update_from_iq(samples, center_hz=center, sample_rate=sr)
         except Exception:
             pass
 
-        # demod
+        # Python demod only for IQ backends
         if self.play_audio_btn.isChecked():
             dem = self.demod_combo.currentText()
 
             if dem == "FM":
-                # For VHF voice, NBFM channel width ~ 12.5-25 kHz.
-                # If you are doing WFM broadcast, set this ~ 200e3.
                 try:
                     audio = fm_demod_to_audio(
                         samples,
@@ -287,7 +445,7 @@ class SDRPanel(QtWidgets.QWidget):
                 except Exception:
                     pass
 
-    # ---------------- audio stream handling ----------------
+    # ---------------- audio stream handling (IQ backends only) ----------------
 
     def _on_audio_toggle(self, checked: bool):
         if checked:
@@ -306,12 +464,10 @@ class SDRPanel(QtWidgets.QWidget):
         self._audio_q = []
 
         def cb(outdata, frames, time_info, status):
-            # mono float32 output
             if self._audio_q:
                 blk = self._audio_q.pop(0)
                 if blk.ndim == 1:
                     blk = blk.reshape(-1, 1)
-
                 n = min(frames, blk.shape[0])
                 outdata[:n, 0] = blk[:n, 0]
                 if n < frames:
@@ -350,11 +506,9 @@ class SDRPanel(QtWidgets.QWidget):
         if audio.ndim != 1:
             audio = audio.reshape(-1)
 
-        # small limiter
         m = float(np.max(np.abs(audio)) + 1e-12)
         audio = audio / m
 
-        # queue control (avoid growing forever)
         self._audio_q.append(audio)
         if len(self._audio_q) > 20:
             self._audio_q = self._audio_q[-10:]
@@ -367,7 +521,6 @@ class SDRPanel(QtWidgets.QWidget):
             from scipy.signal import resample_poly
             return resample_poly(audio, fs_out, int(fs_in)).astype(np.float32)
         except Exception:
-            # fallback crude decimation
             decim = max(1, int(fs_in / fs_out))
             return audio[::decim].astype(np.float32)
 
@@ -397,8 +550,8 @@ class SDRPanel(QtWidgets.QWidget):
             return
 
         sr_dev = float(self.samplerate_spin.value())
-
         dem = self.demod_combo.currentText()
+
         if dem == "FM":
             try:
                 audio = fm_demod_to_audio(
@@ -423,7 +576,6 @@ class SDRPanel(QtWidgets.QWidget):
             QtWidgets.QMessageBox.information(self, "No audio", "RTTY does not output audio in this demo")
             return
 
-        # normalize to int16 and save
         audio = np.asarray(audio, dtype=np.float32)
         audio = audio / (np.max(np.abs(audio)) + 1e-12)
         audio16 = (audio * 0.9 * 32767).astype(np.int16)
