@@ -50,7 +50,7 @@ class AboutDialog(QtWidgets.QDialog):
         project = "Space Research Centre, Nepal Academy of Science and Technology (NAST) Ground Station"
         dev_email = "prabinpokharel7777@gmail.com"
         supervisor_name = "Er. Hari Ram Shrestha"
-        supervisor_email = "haristha@gmail.com"
+        supervisor_email = "haristha9@gmail.com"
         github = "https://github.com/prabin7777/nast_gs"
 
         gqrx_link = "https://github.com/gqrx-sdr/gqrx/releases/tag/v2.14.5"
