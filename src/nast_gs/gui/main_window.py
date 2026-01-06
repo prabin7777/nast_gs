@@ -27,13 +27,12 @@ def _asset_path(filename: str) -> str:
     # main_window.py is in src/nast_gs/gui/, assets are in src/nast_gs/assets/
     return str(Path(__file__).resolve().parents[1] / "assets" / filename)
 
-
 class AboutDialog(QtWidgets.QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("About App")
         self.setModal(True)
-        self.setMinimumWidth(800)
+        self.resize(900, 650)   # better than min sizes for long manual
 
         layout = QtWidgets.QVBoxLayout(self)
 
@@ -45,6 +44,7 @@ class AboutDialog(QtWidgets.QDialog):
 
         info = QtWidgets.QTextBrowser()
         info.setOpenExternalLinks(True)
+        info.setReadOnly(True)
 
         developer = "Er. Damodar Pokhrel"
         project = "Space Research Centre, Nepal Academy of Science and Technology (NAST) Ground Station"
@@ -53,8 +53,77 @@ class AboutDialog(QtWidgets.QDialog):
         supervisor_email = "haristha@gmail.com"
         github = "https://github.com/prabin7777/nast_gs"
 
+        gqrx_link = "https://github.com/gqrx-sdr/gqrx/releases/tag/v2.14.5"
+        zadig_link = "https://zadig.akeo.ie/"
+
+        manual_html = f"""
+        <h3>User Manual (Quick Setup)</h3>
+
+        <p><b>Downloads</b></p>
+        <ul>
+          <li><b>Gqrx:</b> <a href="{gqrx_link}">{gqrx_link}</a></li>
+          <li><b>Zadig (Windows RTL-SDR driver):</b> <a href="{zadig_link}">{zadig_link}</a></li>
+        </ul>
+
+        <ol>
+          <li><b>Install Gqrx</b><br>
+              Download and install <b>Gqrx</b> from the link above.</li>
+
+          <li><b>Install RTL-SDR Driver (Windows only)</b><br>
+              If RTL-SDR is not detected, use <b>Zadig</b> to install the WinUSB driver for the correct device.</li>
+
+          <li><b>Enable TCP Control in Gqrx</b><br>
+              Open Gqrx and enable <b>Remote control / TCP</b>. Set host/port and keep it running.</li>
+
+          <li><b>Load TLE Data</b><br>
+              Click <b>Load TLE file</b> and import the satellite TLE (name + 2 lines).</li>
+
+          <li><b>Set Frequency</b><br>
+              Enter the satellite <b>downlink frequency</b>. This is used as the Doppler reference.</li>
+
+          <li><b>Set Ground Station Location</b><br>
+              Enter accurate <b>GS latitude</b>, <b>longitude</b>, and <b>altitude</b>.</li>
+
+          <li><b>Propagate</b><br>
+              Click <b>Propagate</b> to plot the track and compute pass prediction.</li>
+
+          <li><b>SDR Panel Setup</b><br>
+              Press <b>Refresh Devices</b>. Select <b>Gqrx External</b> and set <b>Gqrx host</b> and <b>port</b>
+              to match Gqrx TCP settings.</li>
+
+          <li><b>Start Doppler Updates</b><br>
+              Click <b>Start Doppler Updates</b>.</li>
+
+          <li><b>Start Device</b><br>
+              Click <b>Start Device</b>. The tuned frequency in Gqrx will update via TCP.</li>
+
+          <li><b>Start Tracking</b><br>
+              Click <b>Start Tracking</b>. Watch live <b>AZ/EL/Range/Range-rate</b>.</li>
+
+          <li><b>Enable Rotor</b><br>
+              Click <b>Enable Rotor</b> to send azimuth/elevation to the antenna positioner.</li>
+
+          <li><b>Rotor Connection</b><br>
+              Click <b>Refresh Ports</b>, select correct port (commonly <b>/dev/ttyUSB0</b>), set <b>9600</b> baud,
+              choose <b>Prosistel</b>, tick <b>16-byte</b> if required, then press <b>Connect</b>.</li>
+
+          <li><b>Signal Visualization and Recording</b><br>
+              Use the Gqrx window for spectrum/waterfall view, reception tuning, and recording.</li>
+
+          <li><b>Parking the Rotor (AZ=100, EL=90)</b><br>
+              If the rotor does not park correctly, press <b>Park Rotor</b> and wait until it reaches the park position.</li>
+        </ol>
+        """
+
         info.setHtml(
             f"""
+            <style>
+              body {{ font-family: Arial; font-size: 12px; }}
+              h3 {{ margin-top: 14px; }}
+              li {{ margin-bottom: 8px; }}
+              hr {{ margin: 14px 0; }}
+            </style>
+
             <p><b>Project:</b><br>{project}</p>
             <p><b>Developer:</b><br>{developer}<br>
                <b>Email:</b> {dev_email}</p>
@@ -62,6 +131,8 @@ class AboutDialog(QtWidgets.QDialog):
                <b>Email:</b> {supervisor_email}</p>
             <p><b>GitHub:</b><br>
                <a href="{github}">{github}</a></p>
+            <hr>
+            {manual_html}
             """
         )
 
@@ -97,7 +168,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Window icon (title bar + taskbar)
         try:
-            self.setWindowIcon(QtGui.QIcon(_asset_path("NASTLogo.png")))
+            self.setWindowIcon(QtGui.QIcon(_asset_path("NAST_GS_TRACKER_1.png")))
         except Exception:
             pass
 
@@ -132,7 +203,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._load_header_images()
 
-        self.about_btn = QtWidgets.QPushButton("About App")
+        self.about_btn = QtWidgets.QPushButton("Press for Operator Help")
         self.about_btn.clicked.connect(self._open_about)
         self.about_btn.setFixedHeight(34)
         self.about_btn.setMinimumWidth(110)
@@ -313,7 +384,7 @@ class MainWindow(QtWidgets.QMainWindow):
             pm = pm.scaledToHeight(height, QtCore.Qt.TransformationMode.SmoothTransformation)
             lbl.setPixmap(pm)
 
-        # set_pix(self.nast_logo_lbl, "NASTLogo.png", 42)
+        set_pix(self.nast_logo_lbl, "NASTLogo.png", 42)
         # IMPORTANT: this must match your exact filename in src/nast_gs/assets/
         set_pix(self.nepal_flag_lbl, "NEPALFlag.png", 42)
         
