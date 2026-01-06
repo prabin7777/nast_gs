@@ -98,56 +98,73 @@ def current_state(tle: List[str], dt: datetime, gs_lat: float, gs_lon: float, gs
     }
 
 
-def compute_passes(tle: List[str], start_dt: datetime, hours: int, gs_lat: float, gs_lon: float, gs_alt_m: float = 0.0, step_s: int = 30):
-    """Compute satellite passes over a ground station for the next `hours` hours.
+from datetime import timezone, timedelta
 
-    Returns a list of passes with keys: aos (datetime), los (datetime), tca (datetime), max_el_deg (float), duration_s (int)
+NEPAL_TZ = timezone(timedelta(hours=5, minutes=45), name="NPT")
+
+def to_npt(dt):
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(NEPAL_TZ)
+
+def compute_passes(
+    tle: List[str],
+    start_dt: datetime,
+    hours: int,
+    gs_lat: float,
+    gs_lon: float,
+    gs_alt_m: float = 0.0,
+    step_s: int = 30
+):
+    """
+    Compute passes in UTC. Also attach Nepal-time display fields (NPT).
     """
     minutes = hours * 60
-    pts = propagate_tle(tle, start_dt, minutes=minutes, step_s=step_s, gs_lat=gs_lat, gs_lon=gs_lon, gs_alt_m=gs_alt_m)
+    pts = propagate_tle(
+        tle, start_dt,
+        minutes=minutes, step_s=step_s,
+        gs_lat=gs_lat, gs_lon=gs_lon, gs_alt_m=gs_alt_m
+    )
+
     passes = []
     in_pass = False
     current_pass_pts = []
+
+    def _append_pass(pass_pts):
+        aos = pass_pts[0]["time"]
+        los = pass_pts[-1]["time"]
+        max_pt = max(pass_pts, key=lambda x: x.get("eldeg", 0.0))
+        tca = max_pt["time"]
+        max_el = float(max_pt.get("eldeg", 0.0))
+        duration_s = int((los - aos).total_seconds())
+
+        passes.append({
+            # UTC (for logic / export)
+            "aos": aos,
+            "los": los,
+            "tca": tca,
+
+            # Nepal time (for UI display)
+            "aos_npt": to_npt(aos),
+            "los_npt": to_npt(los),
+            "tca_npt": to_npt(tca),
+
+            "max_el_deg": max_el,
+            "duration_s": duration_s,
+        })
+
     for p in pts:
-        el = p.get('eldeg', 0.0)
+        el = float(p.get("eldeg", 0.0))
         if el > 0.0:
             in_pass = True
             current_pass_pts.append(p)
         else:
-            if in_pass:
-                # pass ended
-                if current_pass_pts:
-                    # compute AOS, LOS, TCA and max elevation
-                    aos = current_pass_pts[0]['time']
-                    los = current_pass_pts[-1]['time']
-                    # TCA = time of max elevation
-                    max_pt = max(current_pass_pts, key=lambda x: x.get('eldeg', 0.0))
-                    tca = max_pt['time']
-                    max_el = max_pt.get('eldeg', 0.0)
-                    duration_s = int((los - aos).total_seconds())
-                    passes.append({
-                        'aos': aos,
-                        'los': los,
-                        'tca': tca,
-                        'max_el_deg': max_el,
-                        'duration_s': duration_s,
-                    })
+            if in_pass and current_pass_pts:
+                _append_pass(current_pass_pts)
                 current_pass_pts = []
             in_pass = False
-    # handle case where pass continues to end of window
+
     if current_pass_pts:
-        aos = current_pass_pts[0]['time']
-        los = current_pass_pts[-1]['time']
-        max_pt = max(current_pass_pts, key=lambda x: x.get('eldeg', 0.0))
-        tca = max_pt['time']
-        max_el = max_pt.get('eldeg', 0.0)
-        duration_s = int((los - aos).total_seconds())
-        passes.append({
-            'aos': aos,
-            'los': los,
-            'tca': tca,
-            'max_el_deg': max_el,
-            'duration_s': duration_s,
-        })
+        _append_pass(current_pass_pts)
 
     return passes
